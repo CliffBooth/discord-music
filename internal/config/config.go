@@ -13,7 +13,7 @@ type Config struct {
 	TOKEN   string
 }
 
-func New() *Config {
+func Load() *Config {
 	err := godotenv.Load()
 	if err != nil {
 		log.Default().Printf("[config] error loading .env file: %v\n", err)

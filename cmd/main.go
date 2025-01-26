@@ -20,7 +20,7 @@ func main() {
 		fmt.Printf("error creating log file: %v\n", err)
 	}
 
-	cfg := config.New()
+	cfg := config.Load()
 
 	logger := log.New(io.MultiWriter(writers...), "", log.LstdFlags|log.Lshortfile)
 
@@ -30,6 +30,6 @@ func main() {
 	// client.ListCommands()
 	// client.GetCurrentApplication()
 	// client.InstallCommands()
-	discord.InstallDefualtCommands(client)
-
+	// discord.InstallDefualtCommands(client)
+	client.RunWebsocket()
 }

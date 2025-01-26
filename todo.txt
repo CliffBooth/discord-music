@@ -18,4 +18,7 @@
 
 [] Also, there is global ratelimit of 50 rps. this bot unlikely will do 50rps, but still it is good to implement this logic.
 
+[] maybe better way to route commands would be make put request with commands in the beginning, then cache id->command from Response
+and then use id when routing commands, instead of name
+
 ==

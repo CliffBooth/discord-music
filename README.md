@@ -4,7 +4,7 @@ idea: write a discord bot that allows to play music (or any audio) from youtube 
 
 [] disocrd bot docs: https://discord.com/developers/docs/quick-start/overview-of-apps
 
-[] do we need configs?
+[x] do we need configs? - of course
 
 ---
 
@@ -15,12 +15,37 @@ idea: write a discord bot that allows to play music (or any audio) from youtube 
         https://github.com/amatsagu/tempest
 
 - [ ] take care of the rate limit! (research what it is and how not to get blocked)
+    - [x] research
 
 
 - [ ] research library for downloading audio from youtube.
 - [ ] research how you can actually stream audio (upload by chunks)
 
 - [ ] run it in docker
+
+- [x] implement request middleware infrastructure
+- [ ] finish implemening ratelimit middleware
+
+- [ ] switch to a normal logger which supports log levels and log format (etc json)
+    - [ ] also logger should do ratation log (for when i run the app in docker)
+    - [ ] maybe impelement logger with log levels yourself
+
+- [ ] try opening websocket. Can we read events from it? (instead of using public url?)
+
+- [ ] cresate some sort of state machine for websocket connection
+
+- [ ] Eventually we need to create our own discord-websocket library and use it from the outside (we need to maximally decouple websocket stuff from the business logic). Use it something like this:
+
+```go
+    func main() { 
+        websocketClient := discord.NewWebsocketClient()
+        websocket.OnCommand("test", func(c discord.MessageContext){}) // OnCommand adds a callback to when someone sends this command to the bot
+        websocket.OnCommand("play", onPlay)
+        websocket.Run() //this handles all the init stuff, hearbeat and reconnect stuff and so on, and also blocks.
+    }
+
+    func onPlay(c discord.MessageContext){...} // context has functions like c.Reply(string), c.SendSomething(), c.Speak(stream) - to play music
+```
 
 ## planned features:
 - [ ] add list of greetings, the bot will say a random one to greet you
@@ -46,3 +71,5 @@ idea: write a discord bot that allows to play music (or any audio) from youtube 
         update_ratelimit(resp) // update cache
     }
     ```
+- [ ] add /мяу command which sends cat pictures 😺
+- [ ] add rickroll somehow (maybe there will be a small chance that music will be rickroll instaead of requested music)

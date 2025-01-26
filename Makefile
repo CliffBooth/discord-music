@@ -3,3 +3,6 @@ docker-run:
 
 build-image:
 	docker build -f build/Dockerfile
+
+run:
+	go run ./cmd
