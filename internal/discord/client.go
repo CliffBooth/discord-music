@@ -6,13 +6,13 @@ import (
 	"discord-music/internal/middleware"
 	"encoding/json"
 	"io"
-	"sort"
 	"sync/atomic"
 	"time"
 
 	"fmt"
-	"log"
 	"net/http"
+
+	"discord-music/internal/log"
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/gorilla/websocket"
@@ -20,8 +20,6 @@ import (
 
 const (
 	BASE_URL = "https://discord.com/api/v10"
-	// BASE_URL = "http://localhost:8000"
-	WESOCKET_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
 )
 
 const (
@@ -69,7 +67,7 @@ const (
 )
 
 type Client struct {
-	logger     *log.Logger
+	logger     log.Logger
 	cfg        *config.Config
 	httpClient *http.Client
 
@@ -92,12 +90,12 @@ func (c *Client) makeRequest(
 	method string,
 	body io.Reader,
 	headers http.Header,
-) {
+) *http.Response {
 	url := BASE_URL + endpoint
 	request, err := http.NewRequest(method, url, body)
 	if err != nil {
-		c.logger.Printf("create request error: %v\n", err)
-		return
+		c.logger.Errorf("create request error: %v\n", err)
+		return nil
 	}
 
 	for k, values := range headers {
@@ -110,11 +108,11 @@ func (c *Client) makeRequest(
 
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		c.logger.Printf("request error: %v\n", err)
-		return
+		c.logger.Errorf("request error: %v\n", err)
+		return nil
 	}
 
-	_ = response
+	return response
 }
 
 // makeJsonRequest simply converts input data to json and adds corresponding content-type header.
@@ -138,13 +136,23 @@ func (c *Client) InstallCommands(commands []Command) {
 	endpoint := fmt.Sprintf("/applications/%s/commands", c.cfg.APP_ID)
 	err := c.makeJsonRequest(endpoint, http.MethodPut, commands)
 	if err != nil {
-		c.logger.Printf("InstallCommands error: %v\n", err)
+		c.logger.Errorf("InstallCommands error: %v\n", err)
 	}
 }
 
-func (c *Client) GetGetaway() {
+func (c *Client) GetGetaway() (string, error) {
+	resp := &struct {
+		Url string `json:"url"`
+	}{}
 	endpoint := "/gateway/bot"
-	c.makeRequest(endpoint, http.MethodGet, nil, nil) //TODO save the websocket url in state
+	r := c.makeRequest(endpoint, http.MethodGet, nil, nil)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		c.logger.Errorf("GetGetaway() error reading response body: %v", err)
+		return "", err
+	}
+	json.Unmarshal(body, resp)
+	return resp.Url, nil
 }
 
 func (c *Client) SendInteractionResponse(interaction_id, interaction_token string, data InteractionResponse) {
@@ -195,34 +203,36 @@ type IdentifyPresence struct {
 	//TODO
 }
 
-func (c *Client) RunWebsocket() {
+func (c *Client) RunWebsocket() error {
 	// var upgrader = websocket.Upgrader{
 	// 	ReadBufferSize:  1024,
 	// 	WriteBufferSize: 1024,
 	// }
 
 	//TODO: cache value "url" from here
-	// c.GetGetAway()
-
-	conn, resp, err := websocket.DefaultDialer.Dial(WESOCKET_URL, nil)
+	url, err := c.GetGetaway()
 	if err != nil {
-		fmt.Println("error = ", err)
-		return
+		return err
+	}
+	c.logger.Debugf("websocket url = %s", url) // TODO: need to append ?v=10&encoding=json at the end.
+
+	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+
+	if err != nil {
+		c.logger.Errorf("error = %v\n", err)
+		return err
 	}
 	defer conn.Close()
-	fmt.Println("Response:")
-	printResponse(resp)
 
 	helloEvent := &HelloMessage{}
 	err = conn.ReadJSON(helloEvent)
 	if err != nil {
-		fmt.Println("error on ReadJSON: ", err)
-		return
+		c.logger.Errorf("RunWebsocket() error: ", err)
+		return err
 	}
-	fmt.Printf("helloEvent = %v\n", helloEvent)
+	c.logger.Debugf("helloEvent = %s", spew.Sprintf("%v", helloEvent))
 
 	if helloEvent.S != nil {
-		// atomic.StoreInt64(&c.state.SequenceNumber, *helloEvent.S)
 		c.state.SequenceNumber.Store(*helloEvent.S)
 		c.state.SequenceStarted.Store(true)
 	}
@@ -242,12 +252,13 @@ func (c *Client) RunWebsocket() {
 	}
 	err = conn.WriteJSON(message)
 	if err != nil {
-		fmt.Printf("error sending identify message: %v\n", err)
-		return
+		c.logger.Errorf("error sending identify message: %v", err)
+		return err
 	}
 
 	hearBeatStartedCh := make(chan struct{})
 	<-hearBeatStartedCh //delete this later
+	return nil
 }
 
 // TODO: add jitter (as in docs)
@@ -266,10 +277,10 @@ func (c *Client) heartbeatProc(conn *websocket.Conn, interval int) {
 		}
 		err := conn.WriteJSON(heartBeat) //TODO: if don't receive ack from the server, must close this connection and Resume
 		if err != nil {
-			fmt.Println("err = ", err)
+			c.logger.Errorf("heartbeatProc() err: ", err)
 			return
 		}
-		spew.Printf("heartbeat sent: %v\n", heartBeat)
+		c.logger.Debugf("heartbeat sent: %s", spew.Sprintf("%v", heartBeat))
 	}
 }
 
@@ -277,30 +288,31 @@ func (c *Client) websocketListen(conn *websocket.Conn) {
 	for {
 		msgType, message, err := conn.ReadMessage()
 		if err != nil {
-			fmt.Println("ReadMessage error: ", err)
+			c.logger.Errorf("ReadMessage error: ", err)
 			return
 		}
 		if msgType == 1 {
 			base := &BaseMessage{}
 			err := json.Unmarshal(message, base)
 			if err != nil {
-				fmt.Println("error unmarshalling base message: ", err)
+				c.logger.Errorf("error unmarshalling base message: ", err)
 				continue
 			}
 			if base.S != nil {
 				c.state.SequenceNumber.Store(*base.S)
 			}
+			c.logger.Debugf("received msg = %v\n", string(message))
 			switch base.Op {
 			case OP_DISPATCH:
 				err := c.routeEvent(message, conn)
 				if err != nil {
-					fmt.Println("websocketListen error: ", err)
+					c.logger.Errorf("websocketListen error: ", err)
 				}
 			case OP_HEARTBEAT_ACK:
 				heartbeatMsg := &HeartBeat{}
 				err := json.Unmarshal(message, heartbeatMsg)
 				if err != nil {
-					fmt.Printf("error unmarshalling op=%d message: %v\n", base.Op, err)
+					c.logger.Errorf("error unmarshalling op=%d message: %v\n", base.Op, err)
 					continue
 				}
 				// if !heartBeatStarted {
@@ -309,11 +321,10 @@ func (c *Client) websocketListen(conn *websocket.Conn) {
 				// 	// hearBeatStartedCh <- struct{}{} // send command to the main process to proceed
 				// }
 			default:
-				fmt.Println("OPCODE RECEIVED: ", base.Op)
+				c.logger.Debugf("OPCODE RECEIVED: ", base.Op)
 			}
-			fmt.Printf("received msg = %#v\n", string(message))
 		} else {
-			fmt.Printf("message type is not 1, but %d, msg=%s\n", msgType, string(message))
+			c.logger.Debugf("message type is not 1, but %d, msg=%s\n", msgType, string(message))
 		}
 	}
 }
@@ -340,6 +351,7 @@ func (c *Client) onReadyEvent(message []byte, conn *websocket.Conn) error {
 	event := &ReadyEvent{}
 	err := json.Unmarshal(message, event)
 	if err != nil {
+		c.logger.Infof("onReadyEvent() error: %v", err)
 		return err
 	}
 
@@ -352,6 +364,7 @@ func (c *Client) onGuildCreateEvent(message []byte, conn *websocket.Conn) error 
 	event := &GuildCreateEvent{}
 	err := json.Unmarshal(message, event)
 	if err != nil {
+		c.logger.Infof("onGuildCreateEvent() error: %v", err)
 		return err
 	}
 
@@ -364,6 +377,7 @@ func (c *Client) onInteraction(message []byte) error {
 	event := &InteractionCreateEvent{}
 	err := json.Unmarshal(message, event)
 	if err != nil {
+		c.logger.Errorf("onInteraction() error: %v", err)
 		return err
 	}
 
@@ -381,27 +395,7 @@ func (c *Client) onInteraction(message []byte) error {
 	return nil
 }
 
-func printResponse(resp *http.Response) {
-	fmt.Println(resp.StatusCode)
-	fmt.Println()
-	headers := make([]string, 0, len(resp.Header))
-	for k := range resp.Header {
-		headers = append(headers, k)
-	}
-	sort.Strings(headers)
-	for _, k := range headers {
-		fmt.Printf("%s: %v\n", k, resp.Header[k])
-	}
-	fmt.Println()
-	body, err := io.ReadAll(resp.Body) //TODO use tee() to be able to read the body again
-	if err != nil {
-		fmt.Println("error reading body!!!")
-		return
-	}
-	fmt.Println(string(body))
-}
-
-func New(logger *log.Logger, cfg *config.Config) *Client {
+func New(logger log.Logger, cfg *config.Config) *Client {
 	httpClient := &http.Client{
 		Transport: http.DefaultTransport,
 	} //TODO: configure
@@ -409,7 +403,7 @@ func New(logger *log.Logger, cfg *config.Config) *Client {
 	middleware.ApplyMiddlewares(
 		httpClient,
 		middleware.RateLimitMiddleware,
-		middleware.LogMiddleware,
+		middleware.GetLogMiddleware(logger),
 	)
 
 	return &Client{

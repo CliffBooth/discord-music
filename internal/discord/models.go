@@ -119,7 +119,7 @@ type GuildCreateEvent struct {
 			Tags         struct {
 			} `json:"tags"`
 			Position    int         `json:"position"`
-			Permissions string      `json:"permissions"`
+			Permissions int         `json:"permissions"`
 			Name        string      `json:"name"`
 			Mentionable bool        `json:"mentionable"`
 			Managed     bool        `json:"managed"`

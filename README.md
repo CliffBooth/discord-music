@@ -9,8 +9,8 @@ idea: write a discord bot that allows to play music (or any audio) from youtube 
 ---
 
 ## todo:
-- [ ] create a simple prototype - hello world discord bot
-    - [ ] research possibility of using discord library (better to do without it)
+- [x] create a simple prototype - hello world discord bot
+    - [x] research possibility of using discord library (better to do without it)
         https://github.com/bwmarrin/discordgo
         https://github.com/amatsagu/tempest
 
@@ -22,13 +22,17 @@ idea: write a discord bot that allows to play music (or any audio) from youtube 
 - [ ] research how you can actually stream audio (upload by chunks)
 
 - [ ] run it in docker
+    - make sure logging works corectly with different configs
 
 - [x] implement request middleware infrastructure
 - [ ] finish implemening ratelimit middleware
 
 - [ ] switch to a normal logger which supports log levels and log format (etc json)
+    - [ ] log everything with module prefix [discord] or [youtube] - so it is easier to find logs
+        - мб можно добавить типо переменную? в каждом моделе в конструкторе на вход принимать логер, а использовать обернутый, с правильным префиксом
     - [ ] also logger should do ratation log (for when i run the app in docker)
-    - [ ] maybe impelement logger with log levels yourself
+    - [x] maybe impelement logger with log levels yourself
+    - [ ] get rid of "log/zap.go:40" in log messages, in logging middleware log headers, status, body etc as separate fields.
 
 - [ ] try opening websocket. Can we read events from it? (instead of using public url?)
 
@@ -48,8 +52,11 @@ idea: write a discord bot that allows to play music (or any audio) from youtube 
 ```
 
 ## planned features:
+- [ ] add ability to add on repeat
+- [ ] add ability to play whole playlists
+
 - [ ] add list of greetings, the bot will say a random one to greet you
-- [ ] For extensiablity, allow http client in discord to add middlewares to it. Implement things like rate-limit checking in middleware. So it can look like this:
+- [x] For extensiablity, allow http client in discord to add middlewares to it. Implement things like rate-limit checking in middleware. So it can look like this:
 
     ```go
     func NewDiscord() {

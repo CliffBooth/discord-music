@@ -1,30 +1,21 @@
 package main
 
 import (
-	"fmt"
-	"io"
-	"log"
-	"os"
-
 	"discord-music/internal/config"
 	"discord-music/internal/discord"
+	"discord-music/internal/log"
+
 )
 
 func main() {
-	writers := []io.Writer{os.Stdout}
-
-	file, err := os.OpenFile("bot.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err == nil {
-		writers = append(writers, file)
-	} else {
-		fmt.Printf("error creating log file: %v\n", err)
-	}
-
 	cfg := config.Load()
 
-	logger := log.New(io.MultiWriter(writers...), "", log.LstdFlags|log.Lshortfile)
+	logger, err := log.NewZapLogger(cfg)
+	if err != nil {
+		log.Default().Fatalf("error creating logger: %v\n", err)
+	}
 
-	logger.Println("started")
+	logger.Info("started")
 
 	client := discord.New(logger, cfg)
 	// client.ListCommands()
