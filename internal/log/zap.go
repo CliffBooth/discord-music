@@ -21,52 +21,52 @@ type ZapLogger struct {
 }
 
 // Debug implements Logger.
-func (z *ZapLogger) Debug(args ...interface{}) {
+func (z *ZapLogger) Debug(args ...any) {
 	z.logger.Sugar().Debug(args)
 }
 
 // Error implements Logger.
-func (z *ZapLogger) Error(args ...interface{}) {
+func (z *ZapLogger) Error(args ...any) {
 	z.logger.Sugar().Error(args)
 }
 
 // Fatal implements Logger.
-func (z *ZapLogger) Fatal(args ...interface{}) {
+func (z *ZapLogger) Fatal(args ...any) {
 	z.logger.Sugar().Fatal(args)
 }
 
 // Info implements Logger.
-func (z *ZapLogger) Info(args ...interface{}) {
+func (z *ZapLogger) Info(args ...any) {
 	z.logger.Sugar().Info(args)
 }
 
 // Warn implements Logger.
-func (z *ZapLogger) Warn(args ...interface{}) {
+func (z *ZapLogger) Warn(args ...any) {
 	z.logger.Sugar().Warn(args)
 }
 
 // Fatalf implements Logger.
-func (z *ZapLogger) Fatalf(pattern string, args ...interface{}) {
+func (z *ZapLogger) Fatalf(pattern string, args ...any) {
 	z.logger.Sugar().Fatalf(pattern, args)
 }
 
 // Debugf implements Logger.
-func (z *ZapLogger) Debugf(pattern string, args ...interface{}) {
+func (z *ZapLogger) Debugf(pattern string, args ...any) {
 	z.logger.Sugar().Debugf(pattern, args)
 }
 
 // Errorf implements Logger.
-func (z *ZapLogger) Errorf(pattern string, args ...interface{}) {
+func (z *ZapLogger) Errorf(pattern string, args ...any) {
 	z.logger.Sugar().Errorf(pattern, args)
 }
 
 // Infof implements Logger.
-func (z *ZapLogger) Infof(pattern string, args ...interface{}) {
+func (z *ZapLogger) Infof(pattern string, args ...any) {
 	z.logger.Sugar().Infof(pattern, args)
 }
 
 // Warnf implements Logger.
-func (z *ZapLogger) Warnf(pattern string, args ...interface{}) {
+func (z *ZapLogger) Warnf(pattern string, args ...any) {
 	z.logger.Sugar().Warnf(pattern, args)
 }
 

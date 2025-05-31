@@ -1,12 +1,14 @@
 package discord
 
 import (
-	"bytes"
-	"discord-music/internal/config"
+	"discord-music/internal/config" // TODO: if we want to treat this package as an external library we need to get rid of these imports
 	"discord-music/internal/middleware"
 	"encoding/json"
-	"io"
+	"os"
+	"os/signal"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"fmt"
@@ -63,15 +65,41 @@ const (
 	GUILD_MESSAGE_POLLS           = 1 << 24
 	DIRECT_MESSAGE_POLLS          = 1 << 25
 
-	BOT_INTENTS = GUILDS | GUILD_MESSAGES /* | MESSAGE_CONTENT */ | DIRECT_MESSAGES
+	BOT_INTENTS = GUILDS | GUILD_MESSAGES /* | MESSAGE_CONTENT */ | DIRECT_MESSAGES | GUILD_VOICE_STATES
 )
 
 type Client struct {
-	logger     log.Logger
-	cfg        *config.Config
-	httpClient *http.Client
+	logger            log.Logger
+	cfg               *config.Config
+	httpClient        *http.Client
+	commands          map[string]CommandFunc
+	gateWayConnection *websocket.Conn
+	wg                *sync.WaitGroup
+	shutdownCh        chan struct{}
 
 	state state
+}
+
+func New(logger log.Logger, cfg *config.Config) *Client {
+	httpClient := &http.Client{
+		Transport: http.DefaultTransport,
+	} //TODO: configure
+
+	middleware.ApplyMiddlewares(
+		httpClient,
+		middleware.RateLimitMiddleware,
+		middleware.GetLogMiddleware(logger),
+	)
+
+	return &Client{
+		logger:     logger, // TODO: maybe wrap this logger into another logger, so that this module has some tag like [discord-client] message...
+		cfg:        cfg,
+		httpClient: httpClient,
+		state:      state{},
+		commands:   map[string]CommandFunc{},
+		wg:         &sync.WaitGroup{},
+		shutdownCh: make(chan struct{}),
+	}
 }
 
 type state struct {
@@ -79,85 +107,77 @@ type state struct {
 	SequenceStarted atomic.Bool // indicates whether sequenceNumber supposed to be nil
 }
 
-func (c *Client) GetCurrentApplication() {
-	endpoint := "/applications/@me"
-	method := "GET"
-	c.makeRequest(endpoint, method, nil, nil)
+func (c *Client) Shutdown() {
+	fmt.Println("inside shutdown")
+
+	close(c.shutdownCh)
+
+	if c.gateWayConnection != nil {
+		c.gateWayConnection.Close()
+	}
+
+	c.wg.Wait()
+	fmt.Println("inside shutdown after Wait()")
 }
 
-func (c *Client) makeRequest(
-	endpoint string,
-	method string,
-	body io.Reader,
-	headers http.Header,
-) *http.Response {
-	url := BASE_URL + endpoint
-	request, err := http.NewRequest(method, url, body)
-	if err != nil {
-		c.logger.Errorf("create request error: %v\n", err)
-		return nil
-	}
+func (c *Client) RunWebsocket() error {
+	// var upgrader = websocket.Upgrader{
+	// 	ReadBufferSize:  1024,
+	// 	WriteBufferSize: 1024,
+	// }
 
-	for k, values := range headers {
-		for _, v := range values {
-			request.Header.Add(k, v)
-		}
-	}
-	request.Header.Add("Authorization", fmt.Sprintf("Bot %s", c.cfg.TOKEN))
-	request.Header.Add("User-Agent", "DiscordBot (https://github.com/CliffBooth/discord-music, 1.0.0)")
-
-	response, err := c.httpClient.Do(request)
-	if err != nil {
-		c.logger.Errorf("request error: %v\n", err)
-		return nil
-	}
-
-	return response
-}
-
-// makeJsonRequest simply converts input data to json and adds corresponding content-type header.
-// This is a separate mehtod because we potentially can have somehting like makeUrlEncodedRequest and so on
-func (c *Client) makeJsonRequest(endpoint, method string, d interface{}) error {
-	data, err := json.Marshal(d)
+	//TODO: cache value "url" from here
+	url, err := c.GetGetaway()
 	if err != nil {
 		return err
 	}
-	body := bytes.NewReader(data)
-	c.makeRequest(endpoint, method, body, http.Header(map[string][]string{"Content-Type": {"application/json; charset=UTF-8"}}))
+	c.logger.Debugf("websocket url = %s", url) // TODO: need to append ?v=10&encoding=json at the end.
+
+	c.gateWayConnection, _, err = websocket.DefaultDialer.Dial(url, nil)
+
+	if err != nil {
+		c.logger.Errorf("error = %v", err)
+		return err
+	}
+
+	helloEvent := &HelloMessage{}
+	err = c.gateWayConnection.ReadJSON(helloEvent)
+	if err != nil {
+		c.logger.Errorf("RunWebsocket() error: ", err)
+		return err
+	}
+	c.logger.Debugf("helloEvent = %s", spew.Sprintf("%v", helloEvent))
+
+	if helloEvent.S != nil {
+		c.state.SequenceNumber.Store(*helloEvent.S)
+		c.state.SequenceStarted.Store(true)
+	}
+
+	go c.heartbeatProc(c.gateWayConnection, helloEvent.D.HeartBeatInterval)
+
+	//TODO: how to handle connection close -> resume ?
+	// TODO: handle heartbeat requests - close current conenction and resume new one
+	go c.websocketListen(c.gateWayConnection)
+
+	message := IdentifyMessage{
+		BaseMessage: BaseMessage{OP_IDENTIFY, nil},
+		D: IdentifyData{
+			Token:   c.cfg.TOKEN,
+			Intents: BOT_INTENTS,
+		},
+	}
+	err = c.gateWayConnection.WriteJSON(message)
+	if err != nil {
+		c.logger.Errorf("error sending identify message: %v", err)
+		return err
+	}
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	c.Shutdown()
+
 	return nil
-}
-
-func (c *Client) ListCommands() {
-	endpoint := fmt.Sprintf("/applications/%s/commands", c.cfg.APP_ID)
-	c.makeRequest(endpoint, http.MethodGet, nil, nil)
-}
-
-func (c *Client) InstallCommands(commands []Command) {
-	endpoint := fmt.Sprintf("/applications/%s/commands", c.cfg.APP_ID)
-	err := c.makeJsonRequest(endpoint, http.MethodPut, commands)
-	if err != nil {
-		c.logger.Errorf("InstallCommands error: %v\n", err)
-	}
-}
-
-func (c *Client) GetGetaway() (string, error) {
-	resp := &struct {
-		Url string `json:"url"`
-	}{}
-	endpoint := "/gateway/bot"
-	r := c.makeRequest(endpoint, http.MethodGet, nil, nil)
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		c.logger.Errorf("GetGetaway() error reading response body: %v", err)
-		return "", err
-	}
-	json.Unmarshal(body, resp)
-	return resp.Url, nil
-}
-
-func (c *Client) SendInteractionResponse(interaction_id, interaction_token string, data InteractionResponse) {
-	endpoint := fmt.Sprintf("/interactions/%s/%s/callback", interaction_id, interaction_token)
-	c.makeJsonRequest(endpoint, http.MethodPost, data)
 }
 
 type BaseMessage struct {
@@ -203,130 +223,111 @@ type IdentifyPresence struct {
 	//TODO
 }
 
-func (c *Client) RunWebsocket() error {
-	// var upgrader = websocket.Upgrader{
-	// 	ReadBufferSize:  1024,
-	// 	WriteBufferSize: 1024,
-	// }
-
-	//TODO: cache value "url" from here
-	url, err := c.GetGetaway()
-	if err != nil {
-		return err
-	}
-	c.logger.Debugf("websocket url = %s", url) // TODO: need to append ?v=10&encoding=json at the end.
-
-	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
-
-	if err != nil {
-		c.logger.Errorf("error = %v\n", err)
-		return err
-	}
-	defer conn.Close()
-
-	helloEvent := &HelloMessage{}
-	err = conn.ReadJSON(helloEvent)
-	if err != nil {
-		c.logger.Errorf("RunWebsocket() error: ", err)
-		return err
-	}
-	c.logger.Debugf("helloEvent = %s", spew.Sprintf("%v", helloEvent))
-
-	if helloEvent.S != nil {
-		c.state.SequenceNumber.Store(*helloEvent.S)
-		c.state.SequenceStarted.Store(true)
-	}
-
-	go c.heartbeatProc(conn, helloEvent.D.HeartBeatInterval)
-
-	//TODO: how to handle connection close -> resume ?
-	// TODO: handle heartbeat requests - close current conenction and resume new one
-	go c.websocketListen(conn)
-
-	message := IdentifyMessage{
-		BaseMessage: BaseMessage{OP_IDENTIFY, nil},
-		D: IdentifyData{
-			Token:   c.cfg.TOKEN,
-			Intents: BOT_INTENTS,
-		},
-	}
-	err = conn.WriteJSON(message)
-	if err != nil {
-		c.logger.Errorf("error sending identify message: %v", err)
-		return err
-	}
-
-	hearBeatStartedCh := make(chan struct{})
-	<-hearBeatStartedCh //delete this later
-	return nil
-}
-
 // TODO: add jitter (as in docs)
 // add checking whether reply has been received
 func (c *Client) heartbeatProc(conn *websocket.Conn, interval int) {
+	c.wg.Add(1)
 	ticker := time.NewTicker(time.Duration(interval) * time.Millisecond)
-	for range ticker.C {
-		loaded := c.state.SequenceNumber.Load()
-		var d = &loaded
-		if c.state.SequenceStarted.Load() {
-			d = nil
-		}
-		heartBeat := &HeartBeat{
-			BaseMessage: BaseMessage{OP_HEARTBEAT, nil},
-			D:           d,
-		}
-		err := conn.WriteJSON(heartBeat) //TODO: if don't receive ack from the server, must close this connection and Resume
-		if err != nil {
-			c.logger.Errorf("heartbeatProc() err: ", err)
+
+	for {
+		select {
+		case <-ticker.C:
+			loaded := c.state.SequenceNumber.Load()
+			var d = &loaded
+			if c.state.SequenceStarted.Load() {
+				d = nil
+			}
+			heartBeat := &HeartBeat{
+				BaseMessage: BaseMessage{OP_HEARTBEAT, nil},
+				D:           d,
+			}
+			err := conn.WriteJSON(heartBeat) //TODO: if don't receive ack from the server, must close this connection and Resume
+			if err != nil {
+				c.logger.Errorf("heartbeatProc() err: %v", err)
+				return
+			}
+			c.logger.Debugf("heartbeat sent: %s", spew.Sprintf("%v", heartBeat))
+		case <-c.shutdownCh:
+			ticker.Stop()
+			c.logger.Info("quit heartbeatProc")
+			c.wg.Done()
 			return
 		}
-		c.logger.Debugf("heartbeat sent: %s", spew.Sprintf("%v", heartBeat))
 	}
 }
 
+// TODO: need shutdown here
 func (c *Client) websocketListen(conn *websocket.Conn) {
+	c.wg.Add(1)
+
+	errorHappened := false
+
 	for {
-		msgType, message, err := conn.ReadMessage()
-		if err != nil {
-			c.logger.Errorf("ReadMessage error: ", err)
+		select {
+		case <-c.shutdownCh:
+			c.logger.Info("quit websocketListen")
+			c.wg.Done()
 			return
-		}
-		if msgType == 1 {
-			base := &BaseMessage{}
-			err := json.Unmarshal(message, base)
+
+		default:
+			if errorHappened {
+				time.Sleep(time.Second)
+				errorHappened = false
+			}
+
+			msgType, message, err := conn.ReadMessage()
 			if err != nil {
-				c.logger.Errorf("error unmarshalling base message: ", err)
+				c.logger.Errorf("ReadMessage error: %v", err)
+				errorHappened = true
 				continue
 			}
-			if base.S != nil {
-				c.state.SequenceNumber.Store(*base.S)
-			}
-			c.logger.Debugf("received msg = %v\n", string(message))
-			switch base.Op {
-			case OP_DISPATCH:
-				err := c.routeEvent(message, conn)
+
+			if msgType == 1 {
+				base := &BaseMessage{}
+				err := json.Unmarshal(message, base)
 				if err != nil {
-					c.logger.Errorf("websocketListen error: ", err)
-				}
-			case OP_HEARTBEAT_ACK:
-				heartbeatMsg := &HeartBeat{}
-				err := json.Unmarshal(message, heartbeatMsg)
-				if err != nil {
-					c.logger.Errorf("error unmarshalling op=%d message: %v\n", base.Op, err)
+					c.logger.Errorf("error unmarshalling base message: %v", err)
 					continue
 				}
-				// if !heartBeatStarted {
-				// 	heartBeatStarted = true
-				// 	// value = heartbeatMsg.S
-				// 	// hearBeatStartedCh <- struct{}{} // send command to the main process to proceed
-				// }
-			default:
-				c.logger.Debugf("OPCODE RECEIVED: ", base.Op)
+				if base.S != nil {
+					c.state.SequenceNumber.Store(*base.S)
+				}
+				c.logger.Debugf("received msg = %v", string(message))
+				switch base.Op {
+				case OP_DISPATCH:
+					err := c.routeEvent(message, conn)
+					if err != nil {
+						c.logger.Errorf("websocketListen error: %v", err)
+					}
+				case OP_HEARTBEAT_ACK:
+					heartbeatMsg := &HeartBeat{}
+					err := json.Unmarshal(message, heartbeatMsg)
+					if err != nil {
+						c.logger.Errorf("error unmarshalling op=%d message: %v", base.Op, err)
+						continue
+					}
+					// if !heartBeatStarted {
+					// 	heartBeatStarted = true
+					// 	// value = heartbeatMsg.S
+					// 	// hearBeatStartedCh <- struct{}{} // send command to the main process to proceed
+					// }
+				default:
+					c.logger.Debugf("OPCODE RECEIVED: ", base.Op)
+				}
+			} else {
+				c.logger.Debugf("message type is not 1, but %d, msg=%s", msgType, string(message))
 			}
-		} else {
-			c.logger.Debugf("message type is not 1, but %d, msg=%s\n", msgType, string(message))
+
 		}
 	}
+}
+
+func (c *Client) sendGateWayEvent(event any) error {
+	if c.gateWayConnection == nil {
+		return fmt.Errorf("no connection")
+	}
+
+	return c.gateWayConnection.WriteJSON(event)
 }
 
 func (c *Client) routeEvent(message []byte, conn *websocket.Conn) error {
@@ -342,8 +343,11 @@ func (c *Client) routeEvent(message []byte, conn *websocket.Conn) error {
 		return c.onGuildCreateEvent(message, conn)
 	case "INTERACTION_CREATE":
 		return c.onInteraction(message)
+	// case "VOICE_STATE_UPDATE":
+	// 	return c.onVoiceStateUpdate(message)
 	default:
-		return fmt.Errorf("routeEvent: unknown T: %s", base.T)
+		c.logger.Debugf("routeEvent: unknown T: %s", base.T)
+		return nil
 	}
 }
 
@@ -363,6 +367,7 @@ func (c *Client) onReadyEvent(message []byte, conn *websocket.Conn) error {
 func (c *Client) onGuildCreateEvent(message []byte, conn *websocket.Conn) error {
 	event := &GuildCreateEvent{}
 	err := json.Unmarshal(message, event)
+
 	if err != nil {
 		c.logger.Infof("onGuildCreateEvent() error: %v", err)
 		return err
@@ -381,35 +386,29 @@ func (c *Client) onInteraction(message []byte) error {
 		return err
 	}
 
-	username := event.D.Member.User.Username
-	responseMsg := fmt.Sprintf("hello, %s 😸", username)
-	response := InteractionResponse{
-		Type: CHANNEL_MESSAGE_WITH_SOURCE,
-		Data: InteractionRespData{
-			Content: responseMsg,
-		},
+	commandText := event.D.Data.Name
+	f, ok := c.commands[commandText]
+	if !ok {
+		c.logger.Info("unknown command: %s", commandText)
+		return nil
 	}
 
-	c.SendInteractionResponse(event.D.ID, event.D.Token, response)
+	err = f(&CommandContext{
+		interactionID:    event.D.ID,
+		interactionToken: event.D.Token,
+
+		Event:  event,
+		client: c,
+	})
+	if err != nil {
+		c.logger.Errorf("command: %s, err: %e", commandText, err)
+		return err
+	}
 
 	return nil
 }
 
-func New(logger log.Logger, cfg *config.Config) *Client {
-	httpClient := &http.Client{
-		Transport: http.DefaultTransport,
-	} //TODO: configure
-
-	middleware.ApplyMiddlewares(
-		httpClient,
-		middleware.RateLimitMiddleware,
-		middleware.GetLogMiddleware(logger),
-	)
-
-	return &Client{
-		logger:     logger, // TODO: maybe wrap this logger into another logger, so that this module has some tag like [discord-client] message...
-		cfg:        cfg,
-		httpClient: httpClient,
-		state:      state{},
-	}
+// this is how you add new commands to this discord client.
+func (c *Client) OnCommand(text string, command CommandFunc) {
+	c.commands[text] = command
 }

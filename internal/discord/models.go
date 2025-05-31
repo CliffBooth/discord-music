@@ -12,9 +12,9 @@ const (
 )
 
 type BaseEvent struct {
-	T  string `json:"t"`
-	S  int    `json:"s"`
-	Op int    `json:"op"`
+	T  string `json:"t,omitempty"`
+	S  int    `json:"s,omitempty"`
+	Op int    `json:"op,omitempty"`
 }
 
 type ReadyEvent struct {
@@ -277,4 +277,32 @@ type InteractionRespData struct {
 	Components      interface{}
 	Attachments     interface{}
 	Poll            interface{}
+}
+
+type UserVoiceStateResponse struct {
+	ChannelID string `json:"channel_id"`
+}
+
+type VoiceStateUpdateRequest struct {
+	OP int                  `json:"op"`
+	D  VoiceStateUpdateData `json:"d"`
+}
+
+type VoiceStateUpdateData struct {
+	GuildID   string `json:"guild_id"`
+	ChannelID string `json:"channel_id"`
+	SelfMute  bool   `json:"self_mute"`
+	SelfDeaf  bool   `json:"slef_deaf"`
+}
+
+type Command struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+
+	//TODO: int64?
+	Type              int   `json:"type"`
+	Integration_types []int `json:"integration_types"`
+	Contexts          []int `json:"contexts"`
+
+	F CommandFunc `json:"-"`
 }

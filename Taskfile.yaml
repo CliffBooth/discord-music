@@ -1,0 +1,11 @@
+version: '3'
+
+tasks:
+  run:
+    go run ./cmd
+  
+  docker-run:
+    docker compose up -f build/docker-compose.yaml
+
+  build-image:
+    docker build -f build/Dockerfile
